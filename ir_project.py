@@ -46,18 +46,22 @@
 *************************************************************************
 '''
 import imp
-for library in ['bs4', 'pdfminer', 'nltk', 'rencode']:
+for library in ['bs4', 'pdfminer', 'nltk']:
     try:
         imp.find_module(library)
     except:
-        print """{0} is not installed \n
-        please run "pip install {0}" to execute this program.""".format(library)
-    modname = library.IMPORT_NAME
-    modname.test()
-        
+        import sys
+        error_msg = """
+        \n
+        *************************************************************************\n
+        {0} is not installed, please run "pip install {0}" before running program.\n
+        *************************************************************************
+        \n"""
+        sys.exit(error_msg.format(library))        
 
 import urllib2
 from bs4 import BeautifulSoup
+import codecs
 from collections import Counter, defaultdict
 import re
 from pdfminer.pdfparser import PDFParser
@@ -66,29 +70,13 @@ from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
 from pdfminer.converter import TextConverter
 from pdfminer.layout import LAParams
 from pdfminer.pdfpage import PDFPage
-from nltk.corpus import wordnet
+from nltk.corpus import wordnet, stopwords
 import nltk.stem
 from nltk.stem.wordnet import WordNetLemmatizer
+import os
+import string
 from StringIO import StringIO
 
-stemmer = nltk.stem.SnowballStemmer('english')
-morph_tag = {'NN':wordnet.NOUN,
-             'JJ':wordnet.ADJ,
-             'VB':wordnet.VERB,
-             'RB':wordnet.ADV,
-            }
-test = "running run ran"
-for t in test:
-    print stemmer.stem(t)
-
-wnl = WordNetLemmatizer()
-pos = nltk.pos_tag(nltk.word_tokenize(test))
-print pos
-for p in pos:
-    print wnl.lemmatize(p[0], morph_tag[p[1]])
-
-def preprocess():
-    
 
 def copy_text(infile=None, outfile=None):
     """
@@ -100,13 +88,14 @@ def copy_text(infile=None, outfile=None):
                 
     return -> None
     """  
-    with open(infile, 'rt') as rd:
-        reader = rd.read()  
-    
-    with open(outfile, 'wt') as wt:
-        wt.write(reader)    
+    if infile:
+        with open(infile, 'rt') as rd:
+            reader = rd.read()  
+    if outfile:
+        with open(outfile, 'wt') as wt:
+            wt.write(reader)    
          
-def word_count(url, file_type=None):
+def download(url, file_type=None):
     """
     Receives an input url and splits page using whitespace. It does handle basic regex
     expressions to eliminate special characters including punctuation.
@@ -132,24 +121,91 @@ def word_count(url, file_type=None):
     #Handles pdf files
     elif file_type == 'pdf':
         txt = pdf_to_text(url)
+        url = url.replace('.pdf', '.txt')
     #Handles all other input types
     else:    
-        page = urllib2.urlopen(url)
+        page = urllib2.urlopen(url)        
         soup = BeautifulSoup(page.read(), 'html.parser')#creates webpage object to scrape for text    
-        txt = soup.text#extracts all text values from site
-        
-    regex = '[\(\)\,\.\#\&\|\:\[\]/~\!,*,\-{2,}]'#group of characters to remove
-    txtclean = re.sub(regex, ' ', txt)
-    word_list = (txtclean.lower().replace('\n',' ').split())
+        txt = ''
+        for tag in soup.find_all('p'):
+            txt += tag.text + '\n'
     
-    #creates a hash table containing all unique words and number of occurrences
+    outfile = os.path.join('original', os.path.splitext(url.split('/')[-1])[0] + '.txt')
+    with open(outfile, 'wb') as wt:
+        wt.write(txt.encode('utf-8'))
+
+def preprocess(dir):
+    """
+    Cleans text and prepares it for future indexing by stripping the following:
+    
+        * numeric and other non-alphabetic characters
+        * punctuation
+        * stop words
+        * urls and other html-like strings
+        * uppercase values
+        * morphological variations
+    
+    Input:
+        dir -> root directory containing both original and copy directories 
+    Output:
+        word_list -> list of words without any affixes
+    """
+    all_words = list()
+    for infile in os.listdir(os.path.join(dir, 'original')):
+        with codecs.open(os.path.join(dir, 'original',infile), encoding='utf-8') as f:
+            cur_text = f.read()
+            
+        print 'Results for ', infile, '\n\tLength before preprocessing: ', \
+                len(nltk.word_tokenize(cur_text))
+        #regex that searches for any url-like pattern
+        http = """http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|\
+        (?:%[0-9a-fA-F][0-9a-fA-F]))+|(w{3}\..+\.[a-z]{2,4})"""
+        regex = '[^A-Za-z\s]+'#regex to remove any non-alphabetic character except whitespace
+        txtclean = re.sub(http, '', cur_text)
+        txtclean = re.sub(regex, ' ', txtclean)
+        
+        print '\tLength after regex: ', len(nltk.word_tokenize(txtclean))
+        
+        """remove all stopwords from text
+            stopwords loaded from nltk stopword list
+        """
+        stpwrds = stopwords.words('english')    
+        word_list = [re.sub(regex, '', word) for word in nltk.word_tokenize(txtclean) \
+                     if not word in string.punctuation and not word in stpwrds]
+        print '\tLength after stopwords: ', len(word_list)
+        
+        porter = nltk.PorterStemmer()
+        print '\tStemming Results '
+        for i, item in enumerate(word_list):
+            word_list[i] = porter.stem(item).lower()
+            print '\t', item, ' -> ', word_list[i]
+        all_words.append(word_list)
+        #rename input file and place in 'copy' directory
+        outfile = os.path.splitext(infile.split('/')[-1])[0] + '.txt'
+        """save cleaned version of current document to 'copy' directory"""
+        with open(os.path.join(dir, 'copy', outfile), 'wb') as wt:
+            wt.write(',\n'.join(word for word in word_list))            
+    return all_words
+        
+def word_count(word_list):  
+    """
+        creates a hash table containing all unique words and number of occurrences
+        
+        Input:
+            Required:
+                word_list -> list of unique words
+        Output:
+            collections Counter object
+    """
+        
+        
     word_count = Counter(word_list)  
     return word_count
 
-def page_freq(url):
+def crawl_links(url):
     """
     Uses input url to search for all hyperlinks in order to create dictionary(hash table)
-    of which words each page contains and the frequency of each word within that page
+    of which words each page containwith open(os.path.join(dir, 'copy', infile), 'wb') as f:s and the frequency of each word within that page
     
     Input:
         Required:
@@ -176,16 +232,14 @@ def page_freq(url):
             """checks the file type to determine whether the document address needs
                 to be appended to the base page, or if it is a stand alone page"""
             if not file_type in ('txt', 'pdf', 'html'):#stand alone page
-                link_list[cur_url] = word_count(cur_url)
+                download(cur_url)
             else:#needs to be appended to base site for full url
-                full_url = url + cur_url
-                link_list[full_url] = word_count(full_url, file_type)
+                download(url + cur_url, file_type)
     
     """clean up link_list to remove any broken or missing links"""
     for link in link_list.keys():
         if link_list[link] is None:
-            del link_list[link]
-    
+            del link_list[link]    
     return link_list
        
 def pdf_to_text(pdf):
@@ -216,7 +270,7 @@ def pdf_to_text(pdf):
     for page in PDFPage.create_pages(pdf_doc):
         interpreter.process_page(page)
         txt += retstr.getvalue()    
-    return txt
+    return txt.decode('utf-8')
 
 def word_freq_table(link_list):
     """
@@ -234,27 +288,30 @@ def word_freq_table(link_list):
         words_all.update(words.keys())
     return words_all    
 
-
-page = urllib2.urlopen('http://www.news.yahoo.com')
-soup = BeautifulSoup(page.read(), 'html.parser')
-for l in soup.find_all('a', href=True):
-    print l.get('href')
+def get_directory():
+    import ir_project
+    return '/'.join(dir for dir in ir_project.__file__.split('/')[:-1])
     
-
 if __name__ == '__main__':
-    url = 'http://web0.cs.memphis.edu/~vrus/teaching/ir-websearch/'
     
-    import os
-    import sys 
-    os.system('get_env_details')
-    page_count = page_freq(url)
-    for link, words in page_count.iteritems():
-        print link
-        for word, count in words.iteritems():
-            print '\tCount: ', count, ' Word: ', word
-             
-     
-    word_frequency = word_freq_table(page_count)
-    for word, count in word_frequency.iteritems():
-        print 'Number of documents: ', count, ' Word: ', word
+    cur_dir = get_directory()
+    os.chdir(cur_dir)
+
+    if not os.path.exists(os.path.join(cur_dir, 'resources/nltk_data')):
+        import sys
+        error_msg = """\n\n
+        **************************************************************\n
+        Assignment 4 uses data from the Natural Language Toolkit.\n\
+        The necessary files have been included in an updated copy \n\
+        of the resources directory. Please download a new copy at:\n\n
+        https://www.dropbox.com/s/v67p3s03lfximtd/resources.zip?dl=0\n
+        Once downloaded, place in the same directory as ir_project.py.\n
+        *****************************************************************
+        \n\n"""
+        sys.exit(error_msg)
+    else:
+        nltk.data.path = [os.path.join('resources','nltk_data')]
+    preprocess(os.path.join(cur_dir, 'resources'))
+
+
     
