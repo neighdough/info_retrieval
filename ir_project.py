@@ -1,10 +1,10 @@
 '''
 *************************************************************************
 *Name:
-*Assignment: Assignment 4
+*Assignment: Assignment 5
 *Description:
 *Author: Nate Ron-Ferguson
-*Date: October 08, 2015
+*Date: October 16, 2015
 *Comments:
     Assignment 2:
         Problem 1: input text resides in 'resources' directory included as 
@@ -43,6 +43,23 @@
         - urls and other html-like strings
         - uppercases
         - morphological variations   
+        
+    Assignment 5:
+        Problem 1 [40 points]. Automatically collect from memphis.edu 10,000 
+        unique documents. The documents should be proper after converting them to txt 
+        (>50 valid tokens after saved as text); only collect .html, .txt, and and .pdf 
+        web files and then convert them to text - make sure you do not keep any of 
+        the presentation tags such as html tags. You may use third party tools to 
+        convert the original files to text. Your output should be a set of 10,000 text 
+        files (not html, txt, or pdf docs) of at least 50 textual tokens each. You must 
+        write your own code to collect the documents - DO NOT use an existing crawler.
+        
+        Store for each proper file the original URL as you will need it later 
+        when displaying the results to the user.
+        
+        Problem 2 [20 points]. Preprocess all the files using assignment #4. Save all
+        preprocessed documents in a single directory which will be the input to
+        the next assignment, index construction.
 *************************************************************************
 '''
 import imp
@@ -59,10 +76,10 @@ for library in ['bs4', 'pdfminer', 'nltk']:
         \n"""
         sys.exit(error_msg.format(library))        
 
-import urllib2
+
 from bs4 import BeautifulSoup
 import codecs
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 import re
 from pdfminer.pdfparser import PDFParser
 from pdfminer.pdfdocument import PDFDocument
@@ -76,8 +93,15 @@ from nltk.stem.wordnet import WordNetLemmatizer
 import os
 import string
 from StringIO import StringIO
+import urllib2
+from urlparse import urljoin
 
-
+def in_domain(url):
+    """
+    check to make sure link is in uom domain
+    """
+    return 'memphis.edu' in url
+    
 def copy_text(infile=None, outfile=None):
     """
     Copies contents of document (text, pdf, html)  from one location to another
@@ -95,44 +119,13 @@ def copy_text(infile=None, outfile=None):
         with open(outfile, 'wt') as wt:
             wt.write(reader)    
          
-def download(url, file_type=None):
-    """
-    Receives an input url and splits page using whitespace. It does handle basic regex
-    expressions to eliminate special characters including punctuation.
-    
-    Input:
-        Required:
-            url -> string; full url for page to be indexed
-        Optional:
-            file_type -> string; file extension that determines how to handle inpout
-    Output:
-        hash table containing words as key values matched with respective frequency
-    """
-    
-    """Tests whether link is active or not. If not, it returns a null value which is
-        later used to remove broken links from hash table"""
-    try:
-        urllib2.urlopen(url)
-    except urllib2.URLError:
-        return None
-    #Handles text files
-    if file_type == 'txt':
-        txt = urllib2.urlopen(urllib2.Request(url)).read()
-    #Handles pdf files
-    elif file_type == 'pdf':
-        txt = pdf_to_text(url)
-        url = url.replace('.pdf', '.txt')
-    #Handles all other input types
-    else:    
-        page = urllib2.urlopen(url)        
-        soup = BeautifulSoup(page.read(), 'html.parser')#creates webpage object to scrape for text    
-        txt = ''
-        for tag in soup.find_all('p'):
-            txt += tag.text + '\n'
-    
-    outfile = os.path.join('original', os.path.splitext(url.split('/')[-1])[0] + '.txt')
+def download(url, intext):
+    print 'download ', url
+    file_name = ''.join([t for t in url if t.isalpha() or t.isdigit() or t == ' ']).rstrip()    
+    outfile = os.path.join('resources','original', file_name + '.txt')
     with open(outfile, 'wb') as wt:
-        wt.write(txt.encode('utf-8'))
+        wt.write('#URL: {0}\n\n'.format(url))
+        wt.write(intext.encode('utf-8'))
 
 def preprocess(dir):
     """
@@ -149,10 +142,14 @@ def preprocess(dir):
         dir -> root directory containing both original and copy directories 
     Output:
         word_list -> list of words without any affixes
+    
+    TODO:
+    modify output to include url to document as first line
     """
     all_words = list()
     for infile in os.listdir(os.path.join(dir, 'original')):
         with codecs.open(os.path.join(dir, 'original',infile), encoding='utf-8') as f:
+            url = f.readline()
             cur_text = f.read()
             
         print 'Results for ', infile, '\n\tLength before preprocessing: ', \
@@ -183,7 +180,8 @@ def preprocess(dir):
         #rename input file and place in 'copy' directory
         outfile = os.path.splitext(infile.split('/')[-1])[0] + '.txt'
         """save cleaned version of current document to 'copy' directory"""
-        with open(os.path.join(dir, 'copy', outfile), 'wb') as wt:
+        with open(os.path.join(dir, 'copy', outfile), 'a') as wt:
+            wt.write(url)
             wt.write(',\n'.join(word for word in word_list))            
     return all_words
         
@@ -202,46 +200,55 @@ def word_count(word_list):
     word_count = Counter(word_list)  
     return word_count
 
-def crawl_links(url):
+def crawl(url):
     """
-    Uses input url to search for all hyperlinks in order to create dictionary(hash table)
-    of which words each page containwith open(os.path.join(dir, 'copy', infile), 'wb') as f:s and the frequency of each word within that page
+    Uses a queue to crawl all links found on current web page. As each link
+    is popped off of the queue, it is opened and scanned for all links within
+    the page. Each linked page is subsequently opened, extracted, saved 
+    locally (in original directory), and preprocessed (in copy directory)
     
-    Input:
-        Required:
-            url -> string representing url for the base page that will serve as the
-                starting point for the search
-    Output:
-        Dictionary (hash table) with the following structure:
-            {Web Page: {word: count}}
+    parameters:
+    url -> string of hyperlink for current document
     """
-    print "\nCalculating frequency for ", url
-    #initializes starting url to begin the search
-    page = urllib2.urlopen(url)
-    soup = BeautifulSoup(page.read(), 'html.parser')
-    #initializes dictionary that will contain each site with its word count
-    link_list = defaultdict(lambda: defaultdict())
-    link_list[url] = word_count(url)#adds base(class home page) page to dictionary
-    for link in soup.find_all('a'):
-        """checks to verify that <a> tag is a link, not an anchor 
+    queue = [url]
+    visited = set([url])
+    #Scans 'original' directory to check for 10,000 documents
+    while len(os.listdir(os.path.join('resources','original'))) < docs:#len(queue) > 0 
+        #checks to make sure that link is valid, outputs error with link if not
+        try:
+            page = urllib2.urlopen(queue[0])
+            soup = BeautifulSoup(page.read(), 'html.parser')
+        except Exception as e:     
+            fd = open('errors.csv', 'a')
+            fd.write(str(e) + ', ' + queue[0] + '\n')
+            fd.close()
+            queue.pop(0)   
+        #remove link from queue    
+        queue.pop(0)
+        for link in soup.find_all(['a', re.compile('[^mailto]')]):
+            new_url = link.get('href')
+            if new_url and new_url[0] == '/':
+                new_url = urljoin(url, new_url)
+            """checks to verify that <a> tag is a link, not an anchor 
             AND that it's not a ppt 
-            AND skip positional links (links with #)"""
-        if link.get('href') and not link.get('href').endswith('ppt') and '#' not in link.get('href'):
-            cur_url = link.get('href')#current url to be indexed
-            file_type = cur_url.split('.')[-1]#gets file extension if it exists
-            """checks the file type to determine whether the document address needs
-                to be appended to the base page, or if it is a stand alone page"""
-            if not file_type in ('txt', 'pdf', 'html'):#stand alone page
-                download(cur_url)
-            else:#needs to be appended to base site for full url
-                download(url + cur_url, file_type)
-    
-    """clean up link_list to remove any broken or missing links"""
-    for link in link_list.keys():
-        if link_list[link] is None:
-            del link_list[link]    
-    return link_list
-       
+            AND skip positional links (links with #)
+            AND that it's in u of m domain
+            AND that it's a new link
+            AND that it's not an email link"""
+            if new_url and not new_url.endswith('ppt') \
+                and '#' not in new_url \
+                and in_domain(new_url) \
+                and new_url not in visited \
+                and 'mailto' not in new_url:                    
+                
+                print '\t', len(queue), '\t', len(visited),'\t', new_url
+                queue.append(new_url)                
+                visited.add(new_url)
+                doc_text = create_text(new_url)
+                if keep(doc_text):
+                    download(new_url, doc_text)   
+    preprocess('resources')             
+        
 def pdf_to_text(pdf):
     """
     method to extract text from pdf document
@@ -289,14 +296,77 @@ def word_freq_table(link_list):
     return words_all    
 
 def get_directory():
+    """
+    helper method to set working directory to ensure paths are correct for
+    later referencing. Currently set up to only work on unix-based machines
+    """
     import ir_project
     return '/'.join(dir for dir in ir_project.__file__.split('/')[:-1])
+
+def create_text(url):
+    """
+    convert input url to raw string
+    Parameters:
+        Input:
+            url -> string; full url for page to be indexed
+            file_type -> string; file extension that determines how to handle input
+
+        Output:
+            txt -> raw string of content from page
+    """
+
+    """Tests whether link is active or not. If not, it returns a null value which is
+        later used to remove broken links from hash table"""
+    try:
+        page = urllib2.urlopen(url)
+        file_type = page.info().getmaintype()
+    except urllib2.URLError as e:
+            fd = open('errors.csv', 'a')
+            fd.write(str(e) + ', ' + url + '\n')
+            fd.close()
+            return None
+    #Handles text files
+#     if file_type == 'txt':
+#         txt = urllib2.urlopen(urllib2.Request(url)).read()
+    #Handles pdf files
+    if file_type == 'application':
+        if page.info().subtype == 'pdf':
+            txt = pdf_to_text(url)
+        else:
+            return None
+    #Handles all other input types
+    else: 
+        page = urllib2.urlopen(url)        
+        soup = BeautifulSoup(page.read(), 'html.parser')#creates webpage object to scrape for text    
+        #list of script text to be extracted
+        scripts = [script.text for script in soup.find_all('script') if script != '\n']
+        txt = soup.text
+        for script in scripts:
+            if script in txt:
+                txt = txt.replace(script, '')        
+    return txt
+
+def keep(converted_text):
+    """
+    perform quick check on document to determine if it contains required
+    number of tokens (50)
     
+    Parameters:
+        Input:
+            converted_text -> document converted to string
+        Output:
+            boolean to retain document, or to toss it
+    """
+    try:
+        return len(nltk.word_tokenize(converted_text)) >= 50
+    except:
+        return False
+        
 if __name__ == '__main__':
     
     cur_dir = get_directory()
     os.chdir(cur_dir)
-
+    
     if not os.path.exists(os.path.join(cur_dir, 'resources/nltk_data')):
         import sys
         error_msg = """\n\n
@@ -311,7 +381,10 @@ if __name__ == '__main__':
         sys.exit(error_msg)
     else:
         nltk.data.path = [os.path.join('resources','nltk_data')]
-    preprocess(os.path.join(cur_dir, 'resources'))
+    
+    url = 'http://www.memphis.edu'
+    docs = 10000
+    crawl(url)
 
 
     
